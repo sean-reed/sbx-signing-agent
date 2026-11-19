@@ -17,20 +17,24 @@ These are done on GitHub, not in the repo files.
       macOS).
 - [ ] **Add a branch ruleset on `main`** that requires the CI checks (`shellcheck` and the
       Ubuntu `tests` job) to pass before merging. Settings → Rules → Rulesets → New branch
-      ruleset. Don't require the macOS job while it's allowed to fail.
+      ruleset. Require the macOS `tests` job too: it passes, and is no longer allowed to fail.
 
 ## CI
 
-- [ ] **Check the first CI run.** It hasn't run yet. Newer ShellCheck on GitHub's runners may
+- [x] **Check the first CI run.** It hasn't run yet. Newer ShellCheck on GitHub's runners may
       report checks that local 0.9.0 doesn't, and the issue forms only get validated once pushed.
-- [ ] **Check the scripts keep their executable bit** when first committed: `git ls-files -s`
+      (All three jobs passed. Still to do: open the "New issue" page on GitHub and check the
+      issue forms render.)
+- [x] **Check the scripts keep their executable bit** when first committed: `git ls-files -s`
       should show `100755` for `sbx-signing-agent`, `tests/run.sh` and `tests/fake-bin/sbx`.
-- [ ] **Pin `actions/checkout` to a full commit SHA** in `.github/workflows/ci.yml` instead of
-      `@v4`, with the version in a comment (e.g. `@<sha> # v4.x.y`).
-- [ ] **Remove `continue-on-error` from the macOS tests job** once it passes, then update the
-      README's platform notes and require the job in the `main` ruleset.
+- [x] **Pin `actions/checkout` to a full commit SHA** in `.github/workflows/ci.yml` instead of
+      `@v4`, with the version in a comment (e.g. `@<sha> # v4.x.y`). (Pinned to v7.0.1, which
+      also clears the Node.js 20 deprecation warning.)
+- [x] **Remove `continue-on-error` from the macOS tests job** once it passes, then update the
+      README's platform notes and require the job in the `main` ruleset. (Done, apart from the
+      ruleset, which is in the GitHub settings list above.)
 
-## Readiness checks (before dropping "experimental")
+## Readiness checks
 
 Against real sbx and GitHub. Record OS, `sbx version` and `ssh -V`, then move each confirmed item
 from "Not yet tested" to "Checked against real sbx" in the README.
@@ -60,7 +64,7 @@ from "Not yet tested" to "Checked against real sbx" in the README.
       agent runs. (v0.54.0, for every built-in agent.)
 - [x] **No main-agent keys leak in** at any point. (v0.54.0, with a decoy key in the terminal's
       agent.)
-- [ ] `tests/run.sh` passes on a clean machine.
+- [x] `tests/run.sh` passes on a clean machine. (CI: Ubuntu and macOS.)
 
 ### Should pass
 
@@ -92,6 +96,7 @@ from "Not yet tested" to "Checked against real sbx" in the README.
 ### Nice to have
 
 - [ ] macOS: `tests/run.sh` and the end-to-end check, or state that it's Linux-only.
+      (`tests/run.sh` passes on macOS in CI; the end-to-end check with real sbx is still to do.)
 - [x] A PEM-format key without a `.pub` file, or document it as unsupported. (Unencrypted
       works; encrypted is refused with instructions. Covered by `tests/run.sh`.)
 - [x] One agent other than Claude Code. (All built-in agents on v0.54.0.)

@@ -9,8 +9,9 @@ It's a hardened replacement for the `start-isolated-ssh.sh` script from Micah Le
 [Background](#background-building-on-the-original-setup-script) for an overview of what was 
 changed and why.
 
-> **Status: experimental.** Developed and checked on Linux (Pop!_OS) with sbx v0.51.0 and
-> v0.54.0. macOS should work but hasn't been tested. Windows isn't supported natively. See
+> **Status:** checked on Linux (Pop!_OS) with sbx v0.51.0 and v0.54.0. It relies on sbx's kit
+> support, which sbx still marks as experimental. The automated tests also pass on macOS, but it
+> hasn't been tried there with real sbx. Windows isn't supported natively. See
 > [Testing status and limitations](#testing-status-and-limitations). Test reports from other
 > setups are welcome; see [Contributing](#contributing).
 
@@ -655,9 +656,9 @@ The script's comments say `~/.local/bin/start-isolated-ssh.sh`, while the post s
 
 - **Platforms:**
   - **Linux:** developed and checked on Pop!_OS with sbx v0.51.0 and v0.54.0.
-  - **macOS:** expected to work but untested. The script avoids Linux-only tools and bash 4
-    features, so it should run with macOS's bash 3.2 and OpenSSH. Whether sbx on macOS honours
-    `ssh.agentSocketPath` the same way is the part that needs checking. `~/.local/bin` isn't on
+  - **macOS:** the automated tests pass on macOS in CI, with its built-in bash 3.2. Not yet
+    tried with real sbx: whether sbx on macOS honours `ssh.agentSocketPath` the same way is the
+    part that needs checking. `~/.local/bin` isn't on
     `PATH` by default (see [Install](#install)), and `tests/run.sh` skips its dash test because
     macOS has no dash.
   - **Windows:** not supported natively. The script needs bash and a Unix socket
@@ -717,7 +718,7 @@ The script's comments say `~/.local/bin/start-isolated-ssh.sh`, while the post s
   - A sandbox **started while the agent was stopped** picks the agent up once it's started: the
     same shell, and a new `sbx exec` session, then see the key and make signed commits. (v0.54.0)
 - **Not yet tested:**
-  1. macOS and WSL2 (see Platforms above).
+  1. macOS and WSL2 with real sbx (see Platforms above).
   2. Whether newer sbx versions fix `sbx kit add` (see above).
 
 ---

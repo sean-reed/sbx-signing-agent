@@ -9,8 +9,7 @@ first so we can agree on the approach.
 
 ## What helps most right now
 
-The project is experimental, and the most useful contribution is **trying it on a setup the
-maintainer hasn't**. The README's
+The most useful contribution is **trying it on a setup the maintainer hasn't**. The README's
 [Not yet tested](README.md#testing-status-and-limitations) list says what's unconfirmed, for
 example:
 
