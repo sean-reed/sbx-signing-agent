@@ -1,0 +1,31 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+#
+# Stand-in for the sbx CLI, used by tests/run.sh. It implements only what
+# sbx-signing-agent calls, records every call in $FAKE_SBX_LOG, and keeps the
+# ssh.agentSocketPath setting in $FAKE_SBX_STATE.
+#
+#   FAKE_SBX_NO_GET=1   behave like an sbx without `settings get`
+
+echo "$*" >>"${FAKE_SBX_LOG:?FAKE_SBX_LOG not set}"
+
+case "$1 ${2:-}" in
+  "settings get")
+    if [ -n "${FAKE_SBX_NO_GET:-}" ]; then
+      echo "sbx: unknown command \"get\"" >&2
+      exit 1
+    fi
+    [ "${3:-}" = "ssh.agentSocketPath" ] || { echo "fake sbx: unexpected setting: $3" >&2; exit 1; }
+    if [ -f "${FAKE_SBX_STATE:?}" ]; then cat "$FAKE_SBX_STATE"; fi
+    ;;
+  "settings set")
+    [ "${3:-}" = "ssh.agentSocketPath" ] || { echo "fake sbx: unexpected setting: $3" >&2; exit 1; }
+    printf '%s\n' "$4" >"${FAKE_SBX_STATE:?}"
+    ;;
+  "daemon restart")
+    ;;
+  *)
+    echo "fake sbx: unexpected call: $*" >&2
+    exit 1
+    ;;
+esac

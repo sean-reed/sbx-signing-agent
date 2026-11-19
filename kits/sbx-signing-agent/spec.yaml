@@ -1,0 +1,88 @@
+# syntax=docker/sandbox-kit:3
+# SPDX-License-Identifier: Apache-2.0
+schemaVersion: "3"
+displayName: Git signing via sbx-signing-agent
+description: >-
+  Signs the agent's git commits and tags with the user's SSH key, through
+  the SSH agent the runtime exposes. The agent may make git signatures and
+  nothing else: no logins, no other namespaces, and no network. Commits are
+  attributed to the host's global git identity.
+
+# Adapted from docker/sandbox-kit-spec examples/git-signing (1.0.0),
+# https://github.com/docker/sandbox-kit-spec/tree/main/examples/git-signing
+# (Apache-2.0). Changes: renamed to sbx-signing-agent (version restarted at
+# 1.0.0, new displayName) so it isn't mistaken for Docker's kit; adds the
+# git-identity@1 capability, a sentence about it in `description` and a line
+# in the agent context.
+kind: mixin
+provides: ["sbx-signing-agent@1.0.0"]
+version: "1.0.0"
+
+capabilities:
+  # Git's SSH signing makes namespaced signatures in the namespace `git`
+  # and nothing else, so that is the whole grant: the key cannot log in
+  # anywhere or sign in another namespace from this sandbox. sbx v0.54.0
+  # still creates and starts the sandbox without an agent; signing (and,
+  # with commit.gpgsign below, committing) then fails.
+  - type: com.docker.sandbox/ssh-agent@1
+    description: Sign git commits and tags with the user's SSH key
+    config:
+      phase: runtime
+      unrestricted: false
+      sign: [git]
+
+  # The runtime copies user.name and user.email from the host's
+  # `git config --global` into the sandbox's global git config, pinned at
+  # sandbox creation. Required: creation fails if the host has none set.
+  - type: com.docker.sandbox/git-identity@1
+    description: Attribute the agent's commits to the user's git identity
+
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      startup:
+        # Fill only missing XDG defaults; ~/.gitconfig still takes precedence.
+        - command: |
+            set -eu
+            config="${XDG_CONFIG_HOME:-$HOME/.config}/git/config"
+            mkdir -p "$(dirname "$config")"
+            set_default() {
+              if git config --file "$config" --get "$1" >/dev/null; then
+                return
+              else
+                status=$?
+                [ "$status" -eq 1 ] || return "$status"
+              fi
+              git config --file "$config" "$1" "$2"
+            }
+            set_default gpg.format ssh
+            set_default gpg.ssh.defaultKeyCommand 'ssh-add -L'
+            set_default commit.gpgsign true
+            set_default tag.gpgsign true
+          env: [XDG_CONFIG_HOME]
+          description: Merge missing signing defaults without replacing user settings
+
+  # Accept one context version through runtime policy, or skip both.
+  # Accepting both conflicts; optionality does not express alternatives.
+  - type: com.docker.sandbox/agent-context@1
+    optional: true
+    config: &agent-context
+      content: |
+        # Git commit signing
+
+        Commits and tags you make are signed with the user's SSH key, through the
+        agent at `$SSH_AUTH_SOCK`. You do not need to pass `-S`.
+
+        - Your author name and email come from the user's git identity. Do not
+          change `user.name` or `user.email`.
+
+        - The agent signs git signatures only. It will not log in to servers or
+          sign anything else, so do not try to use it for `ssh` or `ssh-keygen -Y
+          sign` with another namespace.
+        - If `ssh-add -L` reports no agent or no identities, signing is not
+          available: ask the user to reconnect the agent before committing.
+        - Signing a commit does not mean the user reviewed it. Say which commits
+          you made.
+
+  - type: com.docker.sandbox/agent-context@2
+    optional: true
+    config: *agent-context

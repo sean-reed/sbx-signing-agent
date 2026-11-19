@@ -1,0 +1,71 @@
+name: Test report
+description: Report the result of trying sbx-signing-agent on your setup, whether it worked or not.
+title: "Test report: "
+labels: ["test report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing! Results from setups the maintainer hasn't tried are the most useful
+        contribution right now. See the README's "Not yet tested" list.
+
+        **Don't paste private keys, tokens or full `ssh-add -L` output.** Key fingerprints are fine.
+        For security problems, use the repo's Security tab instead (see SECURITY.md).
+  - type: input
+    id: os
+    attributes:
+      label: Operating system and version
+      placeholder: e.g. macOS 15.2, Ubuntu 24.04, Windows 11 + WSL2 Ubuntu
+    validations:
+      required: true
+  - type: input
+    id: sbx
+    attributes:
+      label: sbx version
+      description: Output of `sbx version`
+    validations:
+      required: true
+  - type: input
+    id: openssh
+    attributes:
+      label: OpenSSH version
+      description: Output of `ssh -V`
+    validations:
+      required: true
+  - type: input
+    id: agent
+    attributes:
+      label: Coding agent
+      placeholder: e.g. claude, codex, gemini
+    validations:
+      required: true
+  - type: checkboxes
+    id: checked
+    attributes:
+      label: What did you check?
+      options:
+        - label: "`tests/run.sh` passes"
+        - label: "`ssh-add -L` in the sandbox shows only the agent signing key"
+        - label: A commit made in the sandbox shows as "Verified" on GitHub
+        - label: The key can't be used to log in (`ssh -T git@github.com` fails in the sandbox)
+        - label: Signing fails after `sbx-signing-agent stop`
+        - label: Clone mode (`sbx create --clone`)
+        - label: "`sbx kit add` on an existing sandbox"
+        - label: Something else (describe below)
+  - type: dropdown
+    id: result
+    attributes:
+      label: Overall result
+      options:
+        - Everything I checked worked
+        - Some things worked, some didn't
+        - It didn't work
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: What you ran, what happened, and any error messages.
+    validations:
+      required: true

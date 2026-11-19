@@ -1,0 +1,11 @@
+sbx-signing-agent
+
+kits/sbx-signing-agent/spec.yaml is adapted from an example in the
+Docker Sandbox Kit Specification
+(https://github.com/docker/sandbox-kit-spec), which carries this notice:
+
+  Docker Sandbox Kit Specification
+  Copyright 2026 Docker, Inc.
+
+  This product includes software developed at Docker, Inc.
+  (https://www.docker.com).

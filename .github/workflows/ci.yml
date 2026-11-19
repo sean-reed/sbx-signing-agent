@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Lint the shell scripts with ShellCheck and run the automated tests.
+# The tests use a stand-in sbx (tests/fake-bin/sbx) and throwaway keys, so no
+# secrets or real sbx are needed.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ShellCheck the scripts
+        run: |
+          shellcheck --version
+          shellcheck sbx-signing-agent tests/run.sh tests/fake-bin/sbx
+
+      # The kit's startup command is POSIX sh embedded in YAML, which
+      # ShellCheck can't read directly. Extract it (yq is preinstalled on
+      # GitHub's Ubuntu runners) and check it as sh.
+      - name: ShellCheck the kit's startup command
+        run: |
+          yq '.capabilities[] | select(.type == "com.docker.sandbox/lifecycle@1") | .config.startup[].command' \
+            kits/sbx-signing-agent/spec.yaml > "$RUNNER_TEMP/kit-startup.sh"
+          test -s "$RUNNER_TEMP/kit-startup.sh" || { echo "no startup command found in spec.yaml" >&2; exit 1; }
+          shellcheck -s sh "$RUNNER_TEMP/kit-startup.sh"
+
+  tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    # macOS is untested (see README "Testing status"); report its result
+    # without failing the whole run until it's confirmed to pass.
+    continue-on-error: ${{ matrix.os == 'macos-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Ubuntu runners have dash but not zsh; install it so the
+      # "refuse non-bash shells" test isn't skipped. macOS already has zsh.
+      - name: Install zsh
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zsh
+
+      - name: Show tool versions
+        run: |
+          bash --version | head -n 1
+          ssh -V
+
+      - name: Run tests
+        run: tests/run.sh

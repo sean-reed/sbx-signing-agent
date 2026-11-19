@@ -1,0 +1,241 @@
+#!/usr/bin/env bash
+#
+# sbx-signing-agent: run a dedicated ssh-agent for Docker Sandboxes (sbx) that
+# holds ONLY the agent signing key, on a fixed socket path that sbx is pinned to.
+#
+# Hardened alternative to start-isolated-ssh.sh from
+# https://micahflee.com/sandboxing-coding-agents/
+#
+# Why a fixed socket instead of swapping SSH_AUTH_SOCK in your shell:
+#   sbx forwards the SSH_AUTH_SOCK of whichever terminal creates/starts/joins a
+#   sandbox, unless `ssh.agentSocketPath` is set. Pinning that setting to this
+#   agent's socket means every sandbox gets this agent no matter which terminal
+#   you use. If this agent is stopped, sandboxes get a dead socket (signing fails)
+#   instead of silently falling back to your main agent (e.g. Bitwarden).
+#
+# Usage:
+#   sbx-signing-agent setup    one-time: start agent, pin sbx to its socket, restart sbx daemon
+#   sbx-signing-agent start    start agent (or reuse it) and (re)load the key with a lifetime
+#   sbx-signing-agent status   show agent state, loaded keys and the sbx socket setting
+#   sbx-signing-agent stop     kill the agent and remove its socket (sandboxes can no longer sign)
+#   sbx-signing-agent allowed-signers [email]
+#                              print the line to add to your host's git allowed-signers file, so
+#                              `git log --show-signature` on the host can verify agent commits
+#                              (email defaults to `git config --global user.email`)
+#   sbx-signing-agent --help   show this help
+#
+# Environment overrides:
+#   SBX_SIGNING_KEY       private key path   (default: ~/.ssh/agent-signing-key)
+#   SBX_SIGNING_SOCK      agent socket path  (default: ~/.ssh/sbx-signing-agent.sock)
+#   SBX_SIGNING_LIFETIME  key lifetime, ssh-add -t format (default: 8h)
+
+# SPDX-License-Identifier: Apache-2.0
+# --- Refuse to be sourced or run by a non-bash shell --------------------------
+# (POSIX-safe so this part works even if dash/zsh reads the file.)
+if [ -z "${BASH_VERSION:-}" ]; then
+  echo "sbx-signing-agent: run this with bash (e.g. ./sbx-signing-agent), not sh/zsh or by sourcing." >&2
+  # `return` fails when the file is executed rather than sourced, so `exit` is reachable.
+  # shellcheck disable=SC2317
+  return 1 2>/dev/null || exit 1
+fi
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  echo "sbx-signing-agent: execute this script, don't source it (it doesn't change your shell)." >&2
+  return 1
+fi
+
+set -euo pipefail
+umask 077
+
+KEY="${SBX_SIGNING_KEY:-$HOME/.ssh/agent-signing-key}"
+SOCK="${SBX_SIGNING_SOCK:-$HOME/.ssh/sbx-signing-agent.sock}"
+LIFETIME="${SBX_SIGNING_LIFETIME:-8h}"
+PIDFILE="${SOCK%.sock}.pid"
+
+die()  { echo "sbx-signing-agent: $*" >&2; exit 1; }
+info() { echo "$*"; }
+
+# Run ssh-add against our agent only, never the caller's SSH_AUTH_SOCK.
+agent_add() { SSH_AUTH_SOCK="$SOCK" SSH_AGENT_PID='' ssh-add "$@"; }
+
+# 0 = agent reachable (with or without keys), 1 = not reachable.
+agent_alive() {
+  [[ -S "$SOCK" ]] || return 1
+  local rc=0
+  agent_add -l >/dev/null 2>&1 || rc=$?
+  [[ $rc -eq 0 || $rc -eq 1 ]]
+}
+
+# PID from pidfile, only if it is still an ssh-agent owned by us.
+agent_pid() {
+  [[ -f "$PIDFILE" ]] || return 1
+  local pid
+  pid="$(tr -cd '0-9' <"$PIDFILE")"
+  [[ -n "$pid" ]] || return 1
+  [[ "$(ps -p "$pid" -o uid= 2>/dev/null | tr -d ' ')" == "$(id -u)" ]] || return 1
+  ps -p "$pid" -o comm= 2>/dev/null | grep -q 'ssh-agent' || return 1
+  echo "$pid"
+}
+
+key_fingerprint() {
+  # Prefer the .pub file. Without it, ssh-keygen reads the public part of an
+  # OpenSSH-format private key without the passphrase. It can't do that for an
+  # encrypted older PEM-format key ("is not a key file"), so this fails.
+  local src="$KEY"
+  [[ -f "$KEY.pub" ]] && src="$KEY.pub"
+  ssh-keygen -lf "$src" -E sha256 2>/dev/null | awk '{print $2}'
+}
+
+sbx_socket_setting() {
+  # Best effort: not every sbx version may support `settings get`.
+  # Assumes it prints the bare value (true for sbx v0.51.0 and v0.54.0). If a later version
+  # adds text around it, `status` will warn about a mismatch even when pinned.
+  sbx settings get ssh.agentSocketPath 2>/dev/null | tr -d '[:space:]"'
+}
+
+usage() {
+  # Print the comment header at the top of this file (after the shebang and the bare "#").
+  awk 'NR <= 2 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"
+}
+
+check_sbx_setting() {
+  command -v sbx >/dev/null 2>&1 || { info "Note: sbx not on PATH; skipped checking its socket setting."; return 0; }
+  local current
+  if current="$(sbx_socket_setting)"; then
+    if [[ "$current" == "$SOCK" ]]; then
+      info "sbx ssh.agentSocketPath -> $SOCK (pinned)"
+    else
+      echo "WARNING: sbx ssh.agentSocketPath is '${current:-<unset>}', not $SOCK." >&2
+      echo "         Sandboxes will use the SSH agent of whatever terminal starts them." >&2
+      echo "         Run: $0 setup" >&2
+    fi
+  else
+    info "Note: couldn't read sbx's ssh.agentSocketPath; make sure you've run '$0 setup' once."
+  fi
+}
+
+do_stop() {
+  local pid
+  if pid="$(agent_pid)"; then
+    SSH_AGENT_PID="$pid" ssh-agent -k >/dev/null 2>&1 || kill "$pid" 2>/dev/null || true
+    info "Stopped signing agent (PID $pid)."
+  elif agent_alive; then
+    die "an agent is listening on $SOCK but its PID is unknown; not killing it blindly. Stop it manually."
+  else
+    info "Signing agent was not running."
+  fi
+  rm -f "$SOCK" "$PIDFILE"
+}
+
+do_start() {
+  [[ -f "$KEY" ]] || die "signing key not found: $KEY"
+  command -v ssh-agent >/dev/null || die "ssh-agent not found"
+
+  # Work out the expected key before starting anything, so a failure leaves no agent behind.
+  local want=""
+  if ! want="$(key_fingerprint)" || [[ -z "$want" ]]; then
+    die "can't read the public key of $KEY without its passphrase (an encrypted PEM-format key?). Create $KEY.pub once with: ssh-keygen -y -f $KEY > $KEY.pub"
+  fi
+  mkdir -p "$(dirname "$SOCK")"
+
+  if agent_alive; then
+    agent_pid >/dev/null || die "an agent is already listening on $SOCK but wasn't started by this script; refusing to use it."
+    info "Reusing running signing agent."
+  else
+    # Clean up a stale socket/pidfile left by a crash or reboot.
+    rm -f "$SOCK" "$PIDFILE"
+    local out pid
+    out="$(ssh-agent -a "$SOCK" -t "$LIFETIME" -s)" || die "ssh-agent failed to start"
+    pid="$(sed -n 's/^SSH_AGENT_PID=\([0-9][0-9]*\);.*/\1/p' <<<"$out")"
+    [[ -n "$pid" ]] || die "could not determine the new agent's PID"
+    echo "$pid" >"$PIDFILE"
+    agent_alive || { do_stop >/dev/null; die "agent started but socket $SOCK is not answering"; }
+    info "Started signing agent (PID $pid) at $SOCK."
+  fi
+
+  # Enforce isolation: the agent must hold this key and nothing else.
+  agent_add -D >/dev/null 2>&1 || true
+  if ! agent_add -t "$LIFETIME" "$KEY"; then
+    do_stop >/dev/null
+    die "failed to load $KEY (wrong passphrase?); agent stopped."
+  fi
+
+  local got count
+  got="$(agent_add -l -E sha256 | awk '{print $2}')"
+  count="$(grep -c . <<<"$got" || true)"
+  if [[ "$count" -ne 1 || "$got" != "$want" ]]; then
+    do_stop >/dev/null
+    local hint=""
+    [[ -f "$KEY.pub" ]] && hint=" If $KEY.pub belongs to a different key, fix or remove it."
+    die "agent does not hold exactly the expected key ($want); agent stopped.$hint"
+  fi
+  info "Loaded $want for $LIFETIME."
+  [[ "${1:-}" == "--no-check" ]] || check_sbx_setting
+}
+
+do_setup() {
+  command -v sbx >/dev/null 2>&1 || die "sbx not found on PATH"
+  do_start --no-check
+  info "Pinning sbx to $SOCK and restarting the sbx daemon (running sandboxes will be interrupted)..."
+  sbx settings set ssh.agentSocketPath "$SOCK"
+  sbx daemon restart
+  info "Done. Inside a sandbox, 'ssh-add -L' should list only the agent signing key."
+}
+
+do_status() {
+  local pid
+  if agent_alive; then
+    if pid="$(agent_pid)"; then info "Signing agent: running (PID $pid) at $SOCK"
+    else info "Signing agent: something is listening on $SOCK (PID unknown)"; fi
+    if agent_add -l -E sha256 >/dev/null 2>&1; then
+      agent_add -l -E sha256
+    else
+      info "No keys loaded (lifetime expired?). Run: $0 start"
+    fi
+  else
+    info "Signing agent: not running (sandboxes cannot sign)."
+  fi
+  check_sbx_setting
+}
+
+# Print "<email> namespaces="git" <key>" for the host's gpg.ssh.allowedSignersFile.
+# Only the host's file is a real check: inside a sandbox the agent controls git's config.
+do_allowed_signers() {
+  local email="${1:-}" pub
+  if [[ -z "$email" ]]; then
+    command -v git >/dev/null 2>&1 || die "git not found; pass the email: $0 allowed-signers <email>"
+    email="$(git config --global --get user.email || true)"
+    [[ -n "$email" ]] || die "no user.email in your global git config; pass it: $0 allowed-signers <email>"
+  fi
+  # Principals are comma-separated patterns; these characters would change what is trusted.
+  [[ "$email" =~ ^[^[:space:],*?!\"]+$ ]] \
+    || die "'$email' contains a space or one of , * ? ! \" which mean something else in an allowed-signers file"
+
+  # Prefer the key the agent actually signs with; fall back to the .pub file.
+  if agent_alive && [[ "$(agent_add -L 2>/dev/null | grep -c '^[a-z]')" -eq 1 ]]; then
+    pub="$(agent_add -L | awk '{print $1" "$2}')"
+  elif [[ -f "$KEY.pub" ]]; then
+    pub="$(awk 'NR == 1 {print $1" "$2}' "$KEY.pub")"
+  else
+    die "no $KEY.pub and no running agent holding the key; run '$0 start' first"
+  fi
+  printf '%s namespaces="git" %s\n' "$email" "$pub"
+
+  local file=""
+  command -v git >/dev/null 2>&1 && file="$(git config --global --get gpg.ssh.allowedSignersFile || true)"
+  if [[ -n "$file" ]]; then
+    echo "Add this line to $file (your gpg.ssh.allowedSignersFile) if it isn't there yet." >&2
+  else
+    echo "Add this line to an allowed-signers file and point git at it:" >&2
+    echo "  git config --global gpg.ssh.allowedSignersFile <file>" >&2
+  fi
+}
+
+case "${1:-}" in
+  setup)  do_setup ;;
+  start)  do_start ;;
+  stop)   do_stop ;;
+  status) do_status ;;
+  allowed-signers) do_allowed_signers "${2:-}" ;;
+  -h|--help|help) usage ;;
+  *) usage >&2; exit 2 ;;
+esac
