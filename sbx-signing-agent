@@ -39,8 +39,10 @@ if [ -z "${BASH_VERSION:-}" ]; then
   return 1 2>/dev/null || exit 1
 fi
 if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
-  echo "sbx-signing-agent: execute this script, don't source it (it doesn't change your shell)." >&2
-  return 1
+  echo "sbx-signing-agent: execute this script, don't source it or pipe it into bash." >&2
+  # When piped into bash, `return` fails (no function or sourced file), so `exit` runs.
+  # shellcheck disable=SC2317
+  return 1 2>/dev/null || exit 1
 fi
 
 set -euo pipefail
@@ -48,6 +50,15 @@ umask 077
 
 KEY="${SBX_SIGNING_KEY:-$HOME/.ssh/agent-signing-key}"
 SOCK="${SBX_SIGNING_SOCK:-$HOME/.ssh/sbx-signing-agent.sock}"
+# A literal ~ (e.g. from a quoted SBX_SIGNING_SOCK="~/x.sock") means $HOME.
+# shellcheck disable=SC2088
+if [[ "$SOCK" == "~/"* ]]; then SOCK="$HOME/${SOCK#\~/}"; fi
+# sbx's daemon resolves the pinned path itself, so it must be absolute. The agent
+# keeps using $SOCK as given: a relative path keeps it under the socket length limit.
+case "$SOCK" in
+  /*) SOCK_ABS="$SOCK" ;;
+  *)  SOCK_ABS="$PWD/${SOCK#./}" ;;
+esac
 LIFETIME="${SBX_SIGNING_LIFETIME:-8h}"
 PIDFILE="${SOCK%.sock}.pid"
 
@@ -65,7 +76,9 @@ agent_alive() {
   [[ $rc -eq 0 || $rc -eq 1 ]]
 }
 
-# PID from pidfile, only if it is still an ssh-agent owned by us.
+# PID from pidfile, only if it is still our ssh-agent: owned by us, and started
+# with `-a $SOCK`. That last check stops a stale pidfile (after a reboot) from
+# matching an unrelated ssh-agent, such as your main one, that reused the PID.
 agent_pid() {
   [[ -f "$PIDFILE" ]] || return 1
   local pid
@@ -73,6 +86,7 @@ agent_pid() {
   [[ -n "$pid" ]] || return 1
   [[ "$(ps -p "$pid" -o uid= 2>/dev/null | tr -d ' ')" == "$(id -u)" ]] || return 1
   ps -p "$pid" -o comm= 2>/dev/null | grep -q 'ssh-agent' || return 1
+  [[ " $(ps -ww -p "$pid" -o args= 2>/dev/null) " == *" -a $SOCK "* ]] || return 1
   echo "$pid"
 }
 
@@ -89,7 +103,7 @@ sbx_socket_setting() {
   # Best effort: not every sbx version may support `settings get`.
   # Assumes it prints the bare value (true for sbx v0.51.0 and v0.54.0). If a later version
   # adds text around it, `status` will warn about a mismatch even when pinned.
-  sbx settings get ssh.agentSocketPath 2>/dev/null | tr -d '[:space:]"'
+  sbx settings get ssh.agentSocketPath 2>/dev/null | sed 's/^[[:space:]"]*//; s/[[:space:]"]*$//'
 }
 
 usage() {
@@ -101,10 +115,10 @@ check_sbx_setting() {
   command -v sbx >/dev/null 2>&1 || { info "Note: sbx not on PATH; skipped checking its socket setting."; return 0; }
   local current
   if current="$(sbx_socket_setting)"; then
-    if [[ "$current" == "$SOCK" ]]; then
-      info "sbx ssh.agentSocketPath -> $SOCK (pinned)"
+    if [[ "$current" == "$SOCK_ABS" ]]; then
+      info "sbx ssh.agentSocketPath -> $SOCK_ABS (pinned)"
     else
-      echo "WARNING: sbx ssh.agentSocketPath is '${current:-<unset>}', not $SOCK." >&2
+      echo "WARNING: sbx ssh.agentSocketPath is '${current:-<unset>}', not $SOCK_ABS." >&2
       echo "         Sandboxes will use the SSH agent of whatever terminal starts them." >&2
       echo "         Run: $0 setup" >&2
     fi
@@ -117,6 +131,10 @@ do_stop() {
   local pid
   if pid="$(agent_pid)"; then
     SSH_AGENT_PID="$pid" ssh-agent -k >/dev/null 2>&1 || kill "$pid" 2>/dev/null || true
+    # Wait for it to exit: it unlinks its socket path on the way out, which would
+    # otherwise remove the socket of an agent started right after this.
+    local _
+    for _ in {1..50}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
     info "Stopped signing agent (PID $pid)."
   elif agent_alive; then
     die "an agent is listening on $SOCK but its PID is unknown; not killing it blindly. Stop it manually."
@@ -160,7 +178,7 @@ do_start() {
   fi
 
   local got count
-  got="$(agent_add -l -E sha256 | awk '{print $2}')"
+  got="$(agent_add -l -E sha256 2>/dev/null | awk '/^[0-9]/ {print $2}' || true)"
   count="$(grep -c . <<<"$got" || true)"
   if [[ "$count" -ne 1 || "$got" != "$want" ]]; then
     do_stop >/dev/null
@@ -175,8 +193,8 @@ do_start() {
 do_setup() {
   command -v sbx >/dev/null 2>&1 || die "sbx not found on PATH"
   do_start --no-check
-  info "Pinning sbx to $SOCK and restarting the sbx daemon (running sandboxes will be interrupted)..."
-  sbx settings set ssh.agentSocketPath "$SOCK"
+  info "Pinning sbx to $SOCK_ABS and restarting the sbx daemon (running sandboxes will be interrupted)..."
+  sbx settings set ssh.agentSocketPath "$SOCK_ABS"
   sbx daemon restart
   info "Done. Inside a sandbox, 'ssh-add -L' should list only the agent signing key."
 }
@@ -206,12 +224,16 @@ do_allowed_signers() {
     email="$(git config --global --get user.email || true)"
     [[ -n "$email" ]] || die "no user.email in your global git config; pass it: $0 allowed-signers <email>"
   fi
-  # Principals are comma-separated patterns; these characters would change what is trusted.
-  [[ "$email" =~ ^[^[:space:],*?!\"]+$ ]] \
-    || die "'$email' contains a space or one of , * ? ! \" which mean something else in an allowed-signers file"
+  # Principals are comma-separated patterns, and a leading # makes the line a comment;
+  # these characters would change or break what is trusted.
+  case "$email" in
+    *[[:space:],*?!\"\\]* | \#*)
+      die "'$email' contains a space, one of , * ? ! \" \\ or a leading #, which mean something else in an allowed-signers file" ;;
+  esac
 
-  # Prefer the key the agent actually signs with; fall back to the .pub file.
-  if agent_alive && [[ "$(agent_add -L 2>/dev/null | grep -c '^[a-z]')" -eq 1 ]]; then
+  # Prefer the key our agent actually signs with (only if this script started it);
+  # fall back to the .pub file.
+  if agent_alive && agent_pid >/dev/null && [[ "$(agent_add -L 2>/dev/null | grep -c '^[a-z]')" -eq 1 ]]; then
     pub="$(agent_add -L | awk '{print $1" "$2}')"
   elif [[ -f "$KEY.pub" ]]; then
     pub="$(awk 'NR == 1 {print $1" "$2}' "$KEY.pub")"

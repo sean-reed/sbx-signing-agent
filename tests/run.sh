@@ -111,7 +111,7 @@ t_start_reuses_agent() {
 t_setup_pins_socket() {
   sa setup
   expect_rc 0
-  grep -qxF "settings set ssh.agentSocketPath ./a.sock" sbx.log || fail "setup didn't pin the socket. sbx calls: $(cat sbx.log)"
+  grep -qxF "settings set ssh.agentSocketPath $PWD/a.sock" sbx.log || fail "setup didn't pin the socket. sbx calls: $(cat sbx.log)"
   grep -qxF "daemon restart" sbx.log || fail "setup didn't restart the daemon. sbx calls: $(cat sbx.log)"
   expect_only_key "$(fingerprint key.pub)"
 }
@@ -123,6 +123,16 @@ t_status_when_pinned() {
   expect_out "Signing agent: running (PID $(agent_pid)) at ./a.sock"
   expect_out "$(fingerprint key.pub)"
   expect_out "(pinned)"
+}
+
+t_status_when_pinned_path_has_spaces() {
+  export SBX_SIGNING_SOCK='./a b.sock'
+  sa setup
+  sa status
+  expect_rc 0
+  expect_out "(pinned)"
+  expect_not_out "WARNING"
+  sa stop  # cleanup_test only knows a.pid
 }
 
 t_status_when_not_running() {
@@ -153,7 +163,7 @@ t_stop() {
   sa stop
   expect_rc 0
   expect_out "Stopped signing agent (PID $pid)."
-  wait_dead "$pid" || fail "agent $pid still running after stop"
+  ! alive "$pid" || fail "stop returned while agent $pid was still running"
   expect_no_agent
 }
 
@@ -195,6 +205,27 @@ t_stop_ignores_unrelated_pid() {
   expect_rc 0
   expect_out "Signing agent was not running."
   alive "$other" || fail "stop killed unrelated process $other"
+}
+
+t_stop_ignores_other_ssh_agent() {
+  # The PID file points at an ssh-agent on another socket, as when your main agent
+  # reuses the PID of a stale pidfile after a reboot.
+  local out other
+  out="$(ssh-agent -a ./other.sock -s)"
+  other="$(sed -n 's/^SSH_AGENT_PID=\([0-9][0-9]*\);.*/\1/p' <<<"$out")"
+  EXTRA_PIDS+=("$other")
+  echo "$other" >a.pid
+  sa stop
+  expect_rc 0
+  expect_out "Signing agent was not running."
+  alive "$other" || fail "stop killed the other ssh-agent $other"
+}
+
+t_refuses_to_be_piped_into_bash() {
+  OUT="$(bash -s start <"$SCRIPT" 2>&1)"; RC=$?
+  expect_rc 1
+  expect_out "don't source it or pipe it into bash"
+  expect_no_agent
 }
 
 t_removes_extra_keys() {
@@ -306,6 +337,17 @@ t_allowed_signers_from_agent() {
   expect_out "point git at it"
 }
 
+t_allowed_signers_ignores_foreign_agent() {
+  use_git_config me@example.com
+  start_foreign_agent
+  ssh-keygen -q -t ed25519 -N '' -C other -f other
+  SSH_AUTH_SOCK=./a.sock ssh-add -q other
+  sa allowed-signers
+  expect_rc 0
+  [[ "$(head -n 1 <<<"$OUT")" == "me@example.com namespaces=\"git\" $(pub_of key.pub)" ]] \
+    || fail "used the foreign agent's key, not key.pub. Output: $OUT"
+}
+
 t_allowed_signers_from_pub() {
   use_git_config
   git config --global gpg.ssh.allowedSignersFile "$PWD/signers"
@@ -334,7 +376,7 @@ t_allowed_signers_needs_email() {
 t_allowed_signers_rejects_patterns() {
   use_git_config
   local bad
-  for bad in '*' 'a@x,b@y' 'a b@x' '!a@x' 'a?@x' 'a"@x'; do
+  for bad in '*' 'a@x,b@y' 'a b@x' '!a@x' 'a?@x' 'a"@x' '#a@x' 'a\b@x'; do
     sa allowed-signers "$bad"
     [[ $RC -eq 1 ]] || fail "accepted '$bad'. Output: $OUT"
   done

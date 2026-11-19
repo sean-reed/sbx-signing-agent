@@ -667,12 +667,13 @@ The script's comments say `~/.local/bin/start-isolated-ssh.sh`, while the post s
   (`tests/fake-bin/sbx`), with throwaway keys and its own agents in a temporary folder. It never
   touches your SSH agent, `~/.ssh` or your sbx settings. Run `tests/run.sh --list` to see the
   cases: start, reuse, setup, status and stop; cleanup after a crash; refusing an agent it
-  didn't start; not killing an unrelated process; removing an extra key; right and wrong
-  passphrases; a `.pub` that doesn't match; PEM-format keys without a `.pub` (unencrypted works,
-  encrypted is refused before any agent starts); the key lifetime running out; refusing to be sourced
-  or run by sh, dash or zsh; an sbx without `settings get`; and the `allowed-signers` line
-  (from the agent or the `.pub`, with no email, and refusing pattern characters). Needs OpenSSH
-  8.4 or later and git 2.32 or later.
+  didn't start; not killing an unrelated process or another ssh-agent named in a stale PID file;
+  removing an extra key; right and wrong passphrases; a `.pub` that doesn't match; PEM-format
+  keys without a `.pub` (unencrypted works, encrypted is refused before any agent starts); the
+  key lifetime running out; refusing to be sourced, piped into bash, or run by sh, dash or zsh;
+  an sbx without `settings get`; a socket path with spaces; and the `allowed-signers` line (from
+  our agent or the `.pub`, never a foreign agent, with no email, and refusing pattern
+  characters). Needs OpenSSH 8.4 or later and git 2.32 or later.
 - **Checked against real sbx:**
   - `sbx settings get ssh.agentSocketPath` exists, and `setup` pinned the socket successfully
     (`source: user`). (v0.51.0)
