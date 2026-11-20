@@ -48,7 +48,9 @@ An optional add-on for JetBrains remote development is a separate repo,
 - `user.name` and `user.email` set in your host's global git config. The `sbx-signing-agent` kit copies
   them into sandboxes. The email must be a verified email on the GitHub account that holds the
   signing key, or GitHub won't show commits as "Verified". Check with
-  `git config --global --get-regexp '^user\.'`.
+  `git config --global --get-regexp '^user\.'`. A `local` `user.name` or `user.email` in a repo
+  takes precedence for sandboxes made from that repo; see
+  [Optional: use a different name or email](#optional-use-a-different-name-or-email).
 - For pushing and pulling: a fine-grained GitHub token for each repo you use with a sandbox. See
   [Create a GitHub token for the repo](#create-a-github-token-for-the-repo). Signing works
   without one.
@@ -111,7 +113,8 @@ Under **Permissions → Repository permissions**:
 Leave **Account permissions** empty.
 
 Give only what the work needs: an agent that only reviews code might need just Contents: Read.
-Which permissions sbx itself needs beyond these hasn't been checked. For a repo owned by an
+These are enough for `git pull`, `git push` and `gh pr create` in the sandbox; sbx needs nothing
+more. For a repo owned by an
 organisation, the organisation may have to approve the token before it works.
 
 Copy the token when GitHub shows it; you'll paste it into `sbx secret set` below. The token's
@@ -146,8 +149,12 @@ sbx run --name <name>
   Leave out `--clone` to share the folder read-write instead; see
   [Clone mode and IDEs](#clone-mode-and-ides) for why clone mode is safer.
 
+  **In either mode**, sbx copies the `user.name` and `user.email` that git uses in this repo, so a
+  `local` setting here wins over your global one. Check with
+  `git config --show-scope --get-regexp '^user\.'` in the repo.
+
   **If you leave out `--clone`**, the sandbox shares your host repo's `.git/config`, so two more
-  things apply:
+  things apply (clone mode isn't affected):
   - Your host repo's settings override the kit's signing defaults and the identity it copies in.
     So in this mode, if your host repo sets `user.signingkey`, `gpg.format`, `user.name` or
     `user.email`, signing in the sandbox may fail or use the wrong identity. Check on the host,
@@ -171,7 +178,8 @@ reports that it isn't in a git repo.
 **To add the kit to an existing sandbox, recreate it.** Don't use `sbx kit add`: with sbx
 v0.54.0 it lists the kit and sets `SSH_AUTH_SOCK`, but never connects the agent, in direct mode,
 clone mode or without a workspace. `ssh-add -L` in the sandbox then says
-`Error connecting to agent: No such file or directory`, even after a restart.
+`Error connecting to agent: No such file or directory`, even after a restart
+([docker/sbx-releases#903](https://github.com/docker/sbx-releases/issues/903)).
 Removing a clone-mode sandbox deletes its clone, so push or fetch any work first, then:
 
 ```bash
@@ -246,7 +254,9 @@ Two checks are real, because the agent can't change them:
 
 ### Optional: use a different name or email
 
-The kit copies your host's `user.name` and `user.email` as they are when the sandbox is created.
+The kit copies the `user.name` and `user.email` that git uses in the repo on your host, as they
+are when the sandbox is created: your global values, unless the repo sets `local` ones (sbx
+v0.54.0, in both modes).
 To change them for one sandbox, run these in a shell inside it. Both are optional.
 
 To add an "(agent)" suffix to the name like in the original post:
@@ -265,8 +275,8 @@ git config --global user.email "<email>"
 ```
 Sets the sandbox's git author name and email. **Changes the sandbox's `~/.gitconfig`.**
 
-Undo either by setting the values back to your host's, shown on the host by
-`git config --global --get-regexp '^user\.'`.
+Undo either by setting the values back to your host's, shown on the host by running
+`git config --get-regexp '^user\.'` in the repo.
 
 - **The email must be verified on the GitHub account that holds the signing key**, or commits
   lose the "Verified" badge. Your GitHub noreply address
@@ -278,8 +288,8 @@ Undo either by setting the values back to your host's, shown on the host by
   `git config --show-scope …` check above shows it.
 - The name and email are only labels: the agent can change them. The real proof of origin is the
   agent signing key's fingerprint on the badge (see [What it doesn't cover](#what-it-doesnt-cover)).
-- Whether sbx keeps the changed values after the sandbox restarts hasn't been tested. sbx fixes
-  the identity when the sandbox is created, so it probably does.
+- The changed values survive a sandbox restart (`sbx stop`, then `sbx run`) and an
+  `sbx daemon restart`: sbx only sets the identity when the sandbox is created (sbx v0.54.0).
 
 ---
 
@@ -352,6 +362,11 @@ restart.
 identities: communication with agent failed` and `user.signingKey needs to be set for ssh
 signing`, or `ssh-add -L` says `communication with agent failed`: the signing agent isn't running.
 Run `sbx-signing-agent start` on the host; a running sandbox picks it up without a restart.
+
+`sbx create` fails with `com.docker.sandbox/git-identity@1 is not available on this host` and
+`needs a git user.name and user.email on this host`: git has no name or email in the repo you're
+creating the sandbox from. Set them with `git config --global user.name "<name>"` and
+`git config --global user.email "<email>"` on the host. **Changes your host's git config.**
 
 `git pull` or `git push` in the sandbox fails with `Connection closed by … port 22`: the clone
 copied your host's SSH remote URL, and the PAT only works over HTTPS. Rewrite GitHub URLs in the
@@ -536,10 +551,12 @@ fails closed, so it is safe, but it is confusing.
   `gpg.ssh.defaultKeyCommand 'ssh-add -L'`, `commit.gpgsign`, `tag.gpgsign`) to the XDG git
   config. Settings in the sandbox's `~/.gitconfig` still take precedence;
 - requests `com.docker.sandbox/git-identity@1` (added to Docker's example). sbx copies
-  `user.name` and `user.email` from your **host's `git config --global`** into the sandbox's
-  global git config. Without this, sandboxes have no author identity at all. The identity is
+  the `user.name` and `user.email` that git uses in the **workspace repo on the host** into the
+  sandbox's global git config. That's your global config unless the repo has `local` values,
+  which win (checked on sbx v0.54.0, in clone mode, whichever directory `sbx create` runs from). Without this, sandboxes have no author identity at all. The identity is
   **fixed when the sandbox is created**: changing your host config later only affects new
-  sandboxes. sbx refuses to create the sandbox if either value is missing on the host. Only those
+  sandboxes. sbx refuses to create the sandbox if the workspace repo has no `user.name` or
+  `user.email` at all, global or `local`; a `local` value alone is enough (sbx v0.54.0). Only those
   two values are copied, never the rest of your git config. The name is used **as is**: unlike
   the post, this kit doesn't add an "(agent)" suffix;
 - tells the agent that its commits are signed and what to do if signing is unavailable.
@@ -717,9 +734,23 @@ The script's comments say `~/.local/bin/start-isolated-ssh.sh`, while the post s
     restart. (v0.54.0)
   - A sandbox **started while the agent was stopped** picks the agent up once it's started: the
     same shell, and a new `sbx exec` session, then see the key and make signed commits. (v0.54.0)
+  - **Clone mode and host repo config:** a `local` `gpg.format`, `user.signingkey` or
+    `commit.gpgsign` in the host repo doesn't reach the clone. A `local` `user.name` or
+    `user.email` does: sbx copies the identity git uses in the workspace repo, whichever
+    directory `sbx create` runs from. (v0.54.0)
+  - **Missing identity:** with no `user.email` in the global or local config, `sbx create` with
+    the kit is refused (`git-identity@1 is not available on this host`). A `local` email alone is
+    enough. (v0.54.0)
+  - A name and email changed inside the sandbox survive `sbx stop`/`sbx run` and
+    `sbx daemon restart`. (v0.54.0)
+  - A fine-grained token with only the [suggested permissions](#create-a-github-token-for-the-repo)
+    is enough for `git pull`, `git push` and `gh pr create` in the sandbox.
 - **Not yet tested:**
-  1. macOS and WSL2 with real sbx (see Platforms above).
-  2. Whether newer sbx versions fix `sbx kit add` (see above).
+  1. macOS and WSL2 with real sbx (see Platforms above;
+     [#1](https://github.com/sean-reed/sbx-signing-agent/issues/1) and
+     [#2](https://github.com/sean-reed/sbx-signing-agent/issues/2)).
+  2. Whether newer sbx versions fix `sbx kit add`
+     ([docker/sbx-releases#903](https://github.com/docker/sbx-releases/issues/903); see above).
 
 ---
 

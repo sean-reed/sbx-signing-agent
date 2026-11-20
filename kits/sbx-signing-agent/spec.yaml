@@ -6,7 +6,7 @@ description: >-
   Signs the agent's git commits and tags with the user's SSH key, through
   the SSH agent the runtime exposes. The agent may make git signatures and
   nothing else: no logins, no other namespaces, and no network. Commits are
-  attributed to the host's global git identity.
+  attributed to the git identity the workspace repo uses on the host.
 
 # Adapted from docker/sandbox-kit-spec examples/git-signing (1.0.0),
 # https://github.com/docker/sandbox-kit-spec/tree/main/examples/git-signing
@@ -31,8 +31,9 @@ capabilities:
       unrestricted: false
       sign: [git]
 
-  # The runtime copies user.name and user.email from the host's
-  # `git config --global` into the sandbox's global git config, pinned at
+  # The runtime copies the user.name and user.email that git uses in the
+  # workspace repo on the host (so a repo-local setting wins over
+  # --global, sbx v0.54.0) into the sandbox's global git config, pinned at
   # sandbox creation. Required: creation fails if the host has none set.
   - type: com.docker.sandbox/git-identity@1
     description: Attribute the agent's commits to the user's git identity
